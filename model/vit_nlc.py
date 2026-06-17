@@ -85,7 +85,7 @@ class Attention(nn.Module):
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads)
         
 
-        if HAS_FLASH_ATTN:
+        if HAS_FLASH_ATTN and x.is_cuda:
             data_type = qkv.dtype
             qkv = qkv.to(torch.float16)
             x = flash_attn_qkvpacked_func(qkv, dropout_p=0.0, softmax_scale=self.scale, causal=False).reshape(B, N, C)
@@ -312,6 +312,65 @@ class PatchEmbed(nn.Module):
         return x, (Hp, Wp), mask
 
 
+class ConvBNAct(nn.Module):
+    def __init__(self, in_chans, out_chans, stride=1):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_chans, out_chans, kernel_size=3, stride=stride, padding=1, bias=False),
+            nn.BatchNorm2d(out_chans),
+            nn.SiLU(inplace=True),
+        )
+
+    def forward(self, x):
+        return self.block(x)
+
+
+class EfficientViTPatchEmbed(nn.Module):
+    """EfficientViT/DC-AE-style patch stem: multi-stage strided conv embedding."""
+
+    def __init__(self, img_size=224, patch_stride=16, in_chans=3, embed_dim=768, hidden_dims=None):
+        super().__init__()
+        img_size = to_2tuple(img_size)
+        patch_stride = to_2tuple(patch_stride)
+        if patch_stride[0] != patch_stride[1]:
+            raise ValueError(f"EfficientViTPatchEmbed expects equal stride, got {patch_stride}.")
+
+        stride = patch_stride[0]
+        if stride <= 0 or (stride & (stride - 1)) != 0:
+            raise ValueError(f"patch_stride must be power-of-two, got {stride}.")
+
+        num_stages = int(math.log2(stride))
+        if hidden_dims is None:
+            hidden_dims = [embed_dim] * max(0, num_stages - 1)
+
+        if len(hidden_dims) < max(0, num_stages - 1):
+            raise ValueError(
+                f"hidden_dims length {len(hidden_dims)} is smaller than required {max(0, num_stages - 1)}"
+            )
+
+        self.img_size = img_size
+        self.patch_shape = (img_size[0] // stride, img_size[1] // stride)
+        self.num_patches = self.patch_shape[0] * self.patch_shape[1]
+
+        layers = []
+        in_dim = in_chans
+        for i in range(num_stages):
+            out_dim = embed_dim if i == num_stages - 1 else hidden_dims[i]
+            layers.append(ConvBNAct(in_dim, out_dim, stride=2))
+            in_dim = out_dim
+        self.proj = nn.Sequential(*layers)
+
+    def forward(self, x, mask=None, **kwargs):
+        x = self.proj(x)
+        hp, wp = x.shape[2], x.shape[3]
+        x = x.flatten(2).transpose(1, 2)
+
+        if mask is not None:
+            mask = F.interpolate(mask[None].float(), size=(hp, wp)).to(torch.bool)[0]
+
+        return x, (hp, wp), mask
+
+
 class Norm2d(nn.Module):
     def __init__(self, embed_dim):
         super().__init__()
@@ -357,7 +416,9 @@ class ViT_Encoder(nn.Module):
                  mask_input=False, 
                  ending_norm=True,
                  round_padding=False, 
-                 compat=False):
+                 compat=False,
+                 patch_embed_type="baseline",
+                 patch_embed_hidden_dims=None):
         super().__init__()
         self.pad_attn_mask = pad_attn_mask  # only effective for detection task input w/ NestedTensor wrapping
         self.freeze_iters = freeze_iters
@@ -378,9 +439,22 @@ class ViT_Encoder(nn.Module):
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         self.z_dim =z_dim
-        self.patch_embed = PatchEmbed(
-            img_size=img_size, patch_size=patch_size, patch_stride= patch_stride,
-            in_chans=in_chans, embed_dim=embed_dim)
+        if patch_embed_type == "efficientvit":
+            self.patch_embed = EfficientViTPatchEmbed(
+                img_size=img_size,
+                patch_stride=patch_stride,
+                in_chans=in_chans,
+                embed_dim=embed_dim,
+                hidden_dims=patch_embed_hidden_dims,
+            )
+        else:
+            self.patch_embed = PatchEmbed(
+                img_size=img_size,
+                patch_size=patch_size,
+                patch_stride=patch_stride,
+                in_chans=in_chans,
+                embed_dim=embed_dim,
+            )
 
         num_patches = self.patch_embed.num_patches
 
@@ -513,7 +587,9 @@ class HyperpriorEncoder(ViT_Encoder):
                 mask_input=False, 
                 ending_norm=True,
                 round_padding=False, 
-                compat=False):
+                compat=False,
+                patch_embed_type=None,
+                patch_embed_hidden_dims=None):
         super().__init__(img_size, patch_size, patch_stride, in_chans, out_chans,
                          z_dim,
                         embed_dim, depth,
@@ -579,7 +655,9 @@ class ViT_Decoder(nn.Module):
                 mask_input=False, 
                 ending_norm=True,
                 round_padding=False, 
-                compat=False):
+                compat=False,
+                patch_embed_type=None,
+                patch_embed_hidden_dims=None):
         super().__init__()
         self.pad_attn_mask = pad_attn_mask  # only effective for detection task input w/ NestedTensor wrapping
         self.freeze_iters = freeze_iters
@@ -719,7 +797,9 @@ class HyperpriorDecoder(ViT_Decoder):
                  mask_input=False, 
                  ending_norm=True,
                  round_padding=False, 
-                 compat=False
+                 compat=False,
+                 patch_embed_type=None,
+                 patch_embed_hidden_dims=None
                  ):
         super().__init__(img_size, patch_size, patch_stride, in_chans, out_chans,
                          z_dim,

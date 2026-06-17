@@ -67,6 +67,8 @@ class VAEformer(nn.Module):
                  sample_posterior=None, 
                  ddconfig=None, 
                  lower_dim= False,
+                 patch_embed_type="baseline",
+                 patch_embed_hidden_dims=None,
                  **kwargs):
         if model_version == 268:
             embed_dim=256
@@ -873,6 +875,11 @@ class VAEformer(nn.Module):
             )
 
 
+
+        if ddconfig is not None and "kwargs" in ddconfig:
+            ddconfig["kwargs"]["patch_embed_type"] = patch_embed_type
+            if patch_embed_hidden_dims is not None:
+                ddconfig["kwargs"]["patch_embed_hidden_dims"] = patch_embed_hidden_dims
 
         super().__init__(**kwargs)
         self.sample_posterior = sample_posterior

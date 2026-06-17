@@ -46,6 +46,8 @@ class ConfigBuilder:
         return VAEformer(
             model_version=model_cfg["model_version"],
             sample_posterior=model_cfg.get("sample_posterior", True),
+            patch_embed_type=model_cfg.get("patch_embed_type", "baseline"),
+            patch_embed_hidden_dims=model_cfg.get("patch_embed_hidden_dims", None),
         )
 
     def build_optimizer(self, model):
