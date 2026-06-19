@@ -42,4 +42,6 @@ trainer:
   refresh_dataloader_each_epoch: false
   valid_num_workers: 1
   save_optimizer_in_snapshot: false
+  save_latest_snapshot: false
   save_best_checkpoint: false
+  save_final_checkpoint: false

@@ -30,11 +30,13 @@ loss:
 
 trainer:
   epochs: 30
-  batch_size: 2
-  valid_batch_size: 2
+  batch_size: 8
+  valid_batch_size: 8
   log_interval: 50
   grad_clip: 1.0
   refresh_dataloader_each_epoch: true
   valid_num_workers: 4
   save_optimizer_in_snapshot: false
+  save_latest_snapshot: false
   save_best_checkpoint: true
+  save_final_checkpoint: true

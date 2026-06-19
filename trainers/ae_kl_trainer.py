@@ -1,6 +1,6 @@
 import os
-import time
 import math
+import gc
 import torch
 import torch.nn.functional as F
 
@@ -61,7 +61,7 @@ class AEKLTrainer:
         ).to(self.device)
 
         self.optimizer = self.builder.build_optimizer(self.model)
-        self.train_loader, _, self.train_sampler = self.builder.build_dataloader(
+        self.train_loader, self.train_dataset, self.train_sampler = self.builder.build_dataloader(
             "train", args.per_cpus, self.distributed
         )
 
@@ -77,11 +77,10 @@ class AEKLTrainer:
 
     def _build_run_dir(self):
         exp_name = self.cfg["experiment"]["name"]
-        ts = time.strftime("%Y%m%d_%H%M%S")
         if self.args.resume and self.args.resume_dir:
             run_dir = self.args.resume_dir
         else:
-            run_dir = os.path.join(self.args.outdir, exp_name, f"world_size{self.args.world_size}-{ts}")
+            run_dir = os.path.join(self.args.outdir, exp_name)
         os.makedirs(run_dir, exist_ok=True)
         return run_dir
 
@@ -113,6 +112,10 @@ class AEKLTrainer:
             snapshot["OPTIMIZER_STATE"] = self.optimizer.state_dict()
         torch.save(snapshot, os.path.join(self.run_dir, "snapshot_latest.pth"))
 
+    def _save_final_checkpoint(self):
+        torch.save(self._model_state(), os.path.join(self.run_dir, "final.pth"))
+        self.logger.info("Save final checkpoint.")
+
     def _resume(self):
         snapshot_path = self.args.snapshot_path or os.path.join(self.run_dir, "snapshot_latest.pth")
         if not os.path.exists(snapshot_path):
@@ -133,8 +136,27 @@ class AEKLTrainer:
         self.global_step = int(snapshot.get("GLOBAL_STEP", 0))
         self.logger.info("Resume from %s at epoch %d", snapshot_path, self.start_epoch)
 
+    def _close_loader(self, loader):
+        if loader is None:
+            return
+        iterator = getattr(loader, "_iterator", None)
+        shutdown_workers = getattr(iterator, "_shutdown_workers", None)
+        if shutdown_workers is not None:
+            shutdown_workers()
+        dataset = getattr(loader, "dataset", None)
+        if hasattr(dataset, "close"):
+            dataset.close()
+
+    def _close_train_loader(self):
+        self._close_loader(getattr(self, "train_loader", None))
+        self.train_loader = None
+        self.train_dataset = None
+        self.train_sampler = None
+        gc.collect()
+
     def _rebuild_train_loader(self):
-        self.train_loader, _, self.train_sampler = self.builder.build_dataloader(
+        self._close_train_loader()
+        self.train_loader, self.train_dataset, self.train_sampler = self.builder.build_dataloader(
             "train", self.args.per_cpus, self.distributed
         )
 
@@ -152,55 +174,60 @@ class AEKLTrainer:
             self.writer.add_scalar("train/lr", self.scheduler.get_last_lr()[0], self.global_step)
 
     @torch.no_grad()
-    def _validate(self):
+    def _validate(self, epoch):
         self.model.eval()
-
-        valid_loader, _, _ = self.builder.build_dataloader(
-            "valid", self.cfg["trainer"].get("valid_num_workers", 4), False
+        valid_loader, _, valid_sampler = self.builder.build_dataloader(
+            "valid", self.cfg["trainer"].get("valid_num_workers", 4), self.distributed
         )
+        if valid_sampler is not None:
+            valid_sampler.set_epoch(epoch)
 
-        std = torch.tensor(STD_LAYER, dtype=torch.float32, device=self.device).view(1, -1, 1, 1)
+        try:
+            std = torch.tensor(STD_LAYER, dtype=torch.float32, device=self.device).view(1, -1, 1, 1)
+            totals = torch.zeros(7, dtype=torch.float64, device=self.device)
 
-        data_num = len(valid_loader.dataset)
-        mix_err = 0.0
-        z_re_loss = q_re_loss = t_re_loss = u_re_loss = v_re_loss = 0.0
+            for x in valid_loader:
+                x = x.to(self.device, non_blocking=True)
+                batch = x.size(0)
 
-        for x in valid_loader:
-            x = x.to(self.device, non_blocking=True)
-            batch = x.size(0)
+                x_recon, _ = self.model(x)
+                x_denorm = x * std
+                x_recon_denorm = x_recon * std
 
-            x_recon, _ = self.model(x)
-            mix_err += F.l1_loss(x_recon, x).item() * batch
+                totals[0] += F.l1_loss(x_recon, x, reduction="mean").double() * batch
+                totals[1] += F.l1_loss(x_recon_denorm[:, 4:17], x_denorm[:, 4:17], reduction="mean").double() * batch
+                totals[2] += F.l1_loss(x_recon_denorm[:, 17:30], x_denorm[:, 17:30], reduction="mean").double() * batch
+                totals[3] += F.l1_loss(x_recon_denorm[:, 30:43], x_denorm[:, 30:43], reduction="mean").double() * batch
+                totals[4] += F.l1_loss(x_recon_denorm[:, 43:56], x_denorm[:, 43:56], reduction="mean").double() * batch
+                totals[5] += F.l1_loss(x_recon_denorm[:, 56:69], x_denorm[:, 56:69], reduction="mean").double() * batch
+                totals[6] += batch
 
-            x_denorm = x * std
-            x_recon_denorm = x_recon * std
+            if self.distributed:
+                torch.distributed.all_reduce(totals, op=torch.distributed.ReduceOp.SUM)
 
-            z_re_loss += F.l1_loss(x_recon_denorm[:, 4:17], x_denorm[:, 4:17]).item() * batch
-            q_re_loss += F.l1_loss(x_recon_denorm[:, 17:30], x_denorm[:, 17:30]).item() * batch
-            u_re_loss += F.l1_loss(x_recon_denorm[:, 30:43], x_denorm[:, 30:43]).item() * batch
-            v_re_loss += F.l1_loss(x_recon_denorm[:, 43:56], x_denorm[:, 43:56]).item() * batch
-            t_re_loss += F.l1_loss(x_recon_denorm[:, 56:69], x_denorm[:, 56:69]).item() * batch
+            data_num = max(totals[6].item(), 1.0)
+            metrics = {
+                "mix_err": (totals[0] / data_num).item(),
+                "z_err": (totals[1] / data_num).item(),
+                "q_err": (totals[2] / data_num).item(),
+                "u_err": (totals[3] / data_num).item(),
+                "v_err": (totals[4] / data_num).item(),
+                "t_err": (totals[5] / data_num).item(),
+            }
 
-        metrics = {
-            "mix_err": mix_err / data_num,
-            "z_err": z_re_loss / data_num,
-            "q_err": q_re_loss / data_num,
-            "u_err": u_re_loss / data_num,
-            "v_err": v_re_loss / data_num,
-            "t_err": t_re_loss / data_num,
-        }
+            if self.rank == 0:
+                self.logger.info(
+                    "Valid mix=%.6f z=%.6f q=%.6f t=%.6f u=%.6f v=%.6f",
+                    metrics["mix_err"], metrics["z_err"], metrics["q_err"],
+                    metrics["t_err"], metrics["u_err"], metrics["v_err"],
+                )
+                if self.writer is not None:
+                    for k, v in metrics.items():
+                        self.writer.add_scalar(f"valid/{k}", v, self.global_step)
 
-        if self.rank == 0:
-            self.logger.info(
-                "Valid mix=%.6f z=%.6f q=%.6f t=%.6f u=%.6f v=%.6f",
-                metrics["mix_err"], metrics["z_err"], metrics["q_err"],
-                metrics["t_err"], metrics["u_err"], metrics["v_err"],
-            )
-            if self.writer is not None:
-                for k, v in metrics.items():
-                    self.writer.add_scalar(f"valid/{k}", v, self.global_step)
-
-        return metrics
+            return metrics
+        finally:
+            self._close_loader(valid_loader)
 
     def train(self):
         epochs = self.cfg["trainer"]["epochs"]
@@ -208,34 +235,34 @@ class AEKLTrainer:
         grad_clip = self.cfg["trainer"].get("grad_clip", 1.0)
         refresh_loader = self.cfg["trainer"].get("refresh_dataloader_each_epoch", True)
 
-        for epoch in range(self.start_epoch, epochs):
-            if refresh_loader and epoch > self.start_epoch:
-                self._rebuild_train_loader()
+        try:
+            for epoch in range(self.start_epoch, epochs):
+                if self.train_loader is None or (refresh_loader and epoch > self.start_epoch):
+                    self._rebuild_train_loader()
 
-            if self.train_sampler is not None:
-                self.train_sampler.set_epoch(epoch)
+                if self.train_sampler is not None:
+                    self.train_sampler.set_epoch(epoch)
 
-            self.model.train()
+                self.model.train()
 
-            for step, x in enumerate(self.train_loader):
-                x = x.to(self.device, non_blocking=True)
-                self.optimizer.zero_grad(set_to_none=True)
+                for step, x in enumerate(self.train_loader):
+                    x = x.to(self.device, non_blocking=True)
+                    self.optimizer.zero_grad(set_to_none=True)
 
-                x_recon, posterior = self.model(x)
-                loss = self.criterion(x_recon, x, posterior)
-                loss.backward()
+                    x_recon, posterior = self.model(x)
+                    loss = self.criterion(x_recon, x, posterior)
+                    loss.backward()
 
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=grad_clip)
-                self.optimizer.step()
-                self.scheduler.step()
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=grad_clip)
+                    self.optimizer.step()
+                    self.scheduler.step()
 
-                if (step + 1) % log_interval == 0:
-                    self._log_train(epoch, step, loss.item())
-                self.global_step += 1
+                    if (step + 1) % log_interval == 0:
+                        self._log_train(epoch, step, loss.item())
+                    self.global_step += 1
 
-            if self.rank == 0:
-                metrics = self._validate()
-                if metrics["mix_err"] < self.best_loss:
+                metrics = self._validate(epoch)
+                if self.rank == 0 and metrics["mix_err"] < self.best_loss:
                     self.best_loss = metrics["mix_err"]
                     if self.cfg["trainer"].get("save_best_checkpoint", True):
                         torch.save(self._model_state(), os.path.join(self.run_dir, "best.pth"))
@@ -243,10 +270,21 @@ class AEKLTrainer:
                     else:
                         self.logger.info("Best metric updated to %.6f (best checkpoint disabled)", self.best_loss)
 
-                self._save_snapshot(epoch)
+                if self.rank == 0 and self.cfg["trainer"].get("save_latest_snapshot", False):
+                    self._save_snapshot(epoch)
+
+                if refresh_loader and epoch + 1 < epochs:
+                    self._close_train_loader()
+
+                if self.distributed:
+                    torch.distributed.barrier(device_ids=[self.local_rank])
+
+            if self.rank == 0 and self.cfg["trainer"].get("save_final_checkpoint", True):
+                self._save_final_checkpoint()
 
             if self.distributed:
                 torch.distributed.barrier(device_ids=[self.local_rank])
-
-        if self.writer is not None:
-            self.writer.close()
+        finally:
+            self._close_train_loader()
+            if self.writer is not None:
+                self.writer.close()

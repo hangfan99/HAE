@@ -11,15 +11,15 @@ set -euo pipefail
 #    QUOTATYPE=reserved bash slurm_train.sh
 #
 # 3) override config / gpus / cpus
-#    CFG=configs/ae_kl_552_16_evit_smoke.yaml GPUS=1 CPUS=4 bash slurm_train.sh
+#    CFG=configs/ae_kl_hybrid_1024_16_full.yaml GPUS=4 CPUS=4 bash slurm_train.sh
 
-GPUS=${GPUS:-2}
+GPUS=${GPUS:-4}
 NODE_NUM=${NODE_NUM:-1}
 CPUS=${CPUS:-4}
 PARTITION=${PARTITION:-earth-e2e-p}
 QUOTATYPE=${QUOTATYPE:-reserved}
-JOB_NAME=${JOB_NAME:-hae_ae_552_16_evit}
-CFG=${CFG:-configs/ae_kl_552_16_evit_smoke.yaml}
+JOB_NAME=${JOB_NAME:-hae_ae_hybrid_1024_16}
+CFG=${CFG:-configs/ae_kl_hybrid_1024_16_full.yaml}
 OUTDIR=${OUTDIR:-output}
 
 SINGLE_GPUS=$((GPUS / NODE_NUM))
@@ -30,15 +30,10 @@ fi
 
 PORT=$(( (RANDOM << 15 | RANDOM) % 49152 + 10000 ))
 
-echo "Using port: ${PORT}"
-echo "Partition: ${PARTITION}, Quota: ${QUOTATYPE}"
-echo "GPUS=${GPUS}, NODE_NUM=${NODE_NUM}, SINGLE_GPUS=${SINGLE_GPUS}, CPUS=${CPUS}"
-echo "Config: ${CFG}"
-echo "Outdir: ${OUTDIR}"
-
 mkdir -p out
+SUBMIT_LOG="./out/submit_${JOB_NAME}.out"
 
-srun -p "${PARTITION}" --quotatype="${QUOTATYPE}" \
+if srun -p "${PARTITION}" --quotatype="${QUOTATYPE}" \
   --job-name="${JOB_NAME}" \
   --ntasks-per-node="${SINGLE_GPUS}" \
   --cpus-per-task=1 \
@@ -52,4 +47,10 @@ srun -p "${PARTITION}" --quotatype="${QUOTATYPE}" \
     --outdir "${OUTDIR}" \
     --init_method "tcp://127.0.0.1:${PORT}" \
     --world_size "${GPUS}" \
-    --per_cpus "${CPUS}"
+    --per_cpus "${CPUS}" > "${SUBMIT_LOG}" 2>&1; then
+  echo "Submitted ${JOB_NAME}. Submit log: ${SUBMIT_LOG}; training log: ./out/train_<jobid>.out"
+else
+  echo "Submit failed. See ${SUBMIT_LOG}" >&2
+  tail -40 "${SUBMIT_LOG}" >&2 || true
+  exit 1
+fi

@@ -46,7 +46,11 @@ def main():
         with open(os.path.join(trainer.run_dir, "config_resolved.yaml"), "w", encoding="utf-8") as f:
             yaml.safe_dump(cfg, f, sort_keys=False)
 
-    trainer.train()
+    try:
+        trainer.train()
+    finally:
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":

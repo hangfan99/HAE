@@ -185,6 +185,39 @@ class era5_128x256_finetune(Dataset):
         w.start()
         self._workers.append(w)
 
+        self._owner_pid = os.getpid()
+        self._closed = False
+
+    def close(self):
+        if getattr(self, "_closed", True):
+            return
+        self._closed = True
+        if os.getpid() != getattr(self, "_owner_pid", None):
+            return
+
+        for worker in getattr(self, "_workers", []):
+            if worker.is_alive():
+                worker.terminate()
+        for worker in getattr(self, "_workers", []):
+            worker.join(timeout=1)
+
+        for q in [getattr(self, "index_queue", None), getattr(self, "unit_data_queue", None)]:
+            if q is not None:
+                q.close()
+                q.cancel_join_thread()
+        for q in getattr(self, "compound_data_queue", []):
+            q.close()
+            q.cancel_join_thread()
+
+        for shm in getattr(self, "sharedmemory_list", []):
+            try:
+                shm.close()
+            except FileNotFoundError:
+                pass
+
+    def __del__(self):
+        self.close()
+
 
     def init_file_list(self, years):
         # get all file lists
