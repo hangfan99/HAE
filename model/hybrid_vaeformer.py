@@ -96,17 +96,18 @@ class DownBlock(nn.Module):
 
 
 class UpBlock(nn.Module):
-    def __init__(self, in_chans, out_chans):
+    def __init__(self, in_chans, out_chans, final_block=False):
         super().__init__()
-        self.main = nn.Sequential(
+        main_layers = [
             nn.Conv2d(in_chans, out_chans * 4, 3, padding=1, bias=False),
             nn.PixelShuffle(2),
-            nn.BatchNorm2d(out_chans),
-            nn.SiLU(inplace=True),
-            ConvBNAct(out_chans, out_chans, kernel_size=3, stride=1, act=False),
-        )
+        ]
+        if not final_block:
+            main_layers.extend([nn.BatchNorm2d(out_chans), nn.SiLU(inplace=True)])
+        main_layers.append(ConvBNAct(out_chans, out_chans, kernel_size=3, stride=1, act=False))
+        self.main = nn.Sequential(*main_layers)
         self.shortcut = ChannelToSpaceShortcut(in_chans, out_chans)
-        self.act = nn.SiLU(inplace=True)
+        self.act = nn.Identity() if final_block else nn.SiLU(inplace=True)
 
     def forward(self, x):
         return self.act(self.main(x) + self.shortcut(x))
@@ -183,10 +184,13 @@ class HybridVAEformer(nn.Module):
         self.from_latent = nn.Conv2d(latent_dim, embed_dim, 1)
 
         decode_dims = list(reversed(stem_dims))
-        up_layers = []
-        for in_dim, out_dim in zip(decode_dims, decode_dims[1:] + [out_chans]):
-            up_layers.append(UpBlock(in_dim, out_dim))
-        self.decoder = nn.Sequential(*up_layers)
+        up_pairs = list(zip(decode_dims, decode_dims[1:] + [out_chans]))
+        self.decoder = nn.Sequential(
+            *[
+                UpBlock(in_dim, out_dim, final_block=(idx == len(up_pairs) - 1))
+                for idx, (in_dim, out_dim) in enumerate(up_pairs)
+            ]
+        )
 
         self.apply(self._init_weights)
         self._fix_init_weight()
