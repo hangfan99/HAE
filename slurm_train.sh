@@ -11,15 +11,15 @@ set -euo pipefail
 #    QUOTATYPE=reserved bash slurm_train.sh
 #
 # 3) override config / gpus / cpus
-#    CFG=configs/ae_kl_hybrid_1024_16_full.yaml GPUS=4 CPUS=4 bash slurm_train.sh
+#    CFG=configs/ae_kl_hybrid_hier2_34_full.yaml GPUS=4 CPUS=4 bash slurm_train.sh
 
 GPUS=${GPUS:-4}
 NODE_NUM=${NODE_NUM:-1}
 CPUS=${CPUS:-4}
 PARTITION=${PARTITION:-earth-e2e-p}
 QUOTATYPE=${QUOTATYPE:-reserved}
-JOB_NAME=${JOB_NAME:-hae_ae_hybrid_1024_16}
-CFG=${CFG:-configs/ae_kl_hybrid_1024_16_full.yaml}
+JOB_NAME=${JOB_NAME:-hae_ae_hybrid_hier2_34}
+CFG=${CFG:-configs/ae_kl_hybrid_hier2_34_full.yaml}
 OUTDIR=${OUTDIR:-output}
 
 SINGLE_GPUS=$((GPUS / NODE_NUM))

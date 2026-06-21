@@ -52,12 +52,13 @@ class AEKLTrainer:
 
         self.model = self.builder.build_model().to(self.device)
         self.model = dist_utils.DistributedParallel_Model(
-            self.model, self.local_rank, find_unused_parameters=True
+            self.model, self.local_rank, find_unused_parameters=False
         )
 
         self.criterion = Mix_loss(
             kl_weight=cfg["loss"].get("kl_weight", 2e-5),
             KL=cfg["loss"].get("enable_kl", True),
+            kl_weights=cfg["loss"].get("kl_weights", None),
         ).to(self.device)
 
         self.optimizer = self.builder.build_optimizer(self.model)
@@ -249,7 +250,7 @@ class AEKLTrainer:
                     x = x.to(self.device, non_blocking=True)
                     self.optimizer.zero_grad(set_to_none=True)
 
-                    x_recon, posterior = self.model(x)
+                    x_recon, posterior = self.model(x, global_step=self.global_step)
                     loss = self.criterion(x_recon, x, posterior)
                     loss.backward()
 

@@ -233,3 +233,195 @@ class HybridVAEformer(nn.Module):
         z = posterior.sample() if self.sample_posterior else posterior.mode()
         x_hat = self.decode(z)
         return x_hat, posterior
+
+
+class StageViT(nn.Module):
+    def __init__(
+        self,
+        dim,
+        depth,
+        num_heads,
+        grid_shape,
+        window_size=(4, 8),
+        mlp_ratio=4.0,
+        qkv_bias=True,
+        drop_path_rate=0.0,
+        learnable_pos=True,
+    ):
+        super().__init__()
+        self.dim = dim
+        self.grid_shape = tuple(grid_shape)
+        pos_embed = get_2d_sincos_pos_embed(dim, self.grid_shape, cls_token=False)
+        self.pos_embed = nn.Parameter(
+            torch.from_numpy(pos_embed).float().unsqueeze(0),
+            requires_grad=learnable_pos,
+        )
+        norm_layer = partial(nn.LayerNorm, eps=1e-6)
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
+        self.blocks = nn.ModuleList(
+            [
+                Block(
+                    dim=dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    drop_path=dpr[i],
+                    norm_layer=norm_layer,
+                    window_size=window_size,
+                    window=True,
+                    rel_pos_spatial=False,
+                    act_layer=QuickGELU,
+                )
+                for i in range(depth)
+            ]
+        )
+        self.norm = norm_layer(dim) if depth > 0 else nn.Identity()
+        self.apply(self._init_weights)
+        self._fix_init_weight()
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            trunc_normal_(module.weight, std=0.02)
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0)
+        elif isinstance(module, nn.LayerNorm):
+            nn.init.constant_(module.bias, 0)
+            nn.init.constant_(module.weight, 1.0)
+
+    def _fix_init_weight(self):
+        for layer_id, layer in enumerate(self.blocks):
+            layer.attn.proj.weight.data.div_(math.sqrt(2.0 * (layer_id + 1)))
+            layer.mlp.fc2.weight.data.div_(math.sqrt(2.0 * (layer_id + 1)))
+
+    def forward(self, feat):
+        if len(self.blocks) == 0:
+            return feat
+        b, c, h, w = feat.shape
+        if (h, w) != self.grid_shape:
+            raise ValueError(f"StageViT expected grid {self.grid_shape}, got {(h, w)}.")
+        x = feat.flatten(2).transpose(1, 2)
+        x = x + self.pos_embed
+        for block in self.blocks:
+            x = block(x, h, w)
+        x = self.norm(x)
+        return x.transpose(1, 2).reshape(b, c, h, w)
+
+
+class HybridHier2VAEformer(nn.Module):
+    def __init__(
+        self,
+        in_chans=69,
+        out_chans=69,
+        img_size=(128, 256),
+        encoder_dims=(256, 512, 768, 1024),
+        bottom_latent_dim=34,
+        top_latent_dim=34,
+        encoder_depths=(1, 2, 2, 4),
+        decoder_depths=(4, 2, 2, 1),
+        num_heads=(8, 8, 12, 16),
+        window_size=((4, 8), (4, 8), (4, 8), (4, 4)),
+        mlp_ratio=4.0,
+        qkv_bias=True,
+        drop_path_rate=0.0,
+        sample_posterior=False,
+        learnable_pos=True,
+        latent_drop_probs=None,
+        bottom_drop_period=4,
+        bottom_scale_init=0.1,
+    ):
+        super().__init__()
+        if len(encoder_dims) != 4:
+            raise ValueError("encoder_dims must have four stages for hier2 model.")
+        if len(encoder_depths) != 4 or len(decoder_depths) != 4:
+            raise ValueError("encoder_depths and decoder_depths must each have four entries.")
+        if len(num_heads) != 4 or len(window_size) != 4:
+            raise ValueError("num_heads and window_size must each have four entries.")
+        if img_size[0] % 16 != 0 or img_size[1] % 16 != 0:
+            raise ValueError(f"img_size {img_size} must be divisible by 16.")
+
+        self.sample_posterior = sample_posterior
+        self.latent_drop_probs = latent_drop_probs or {"full": 1.0, "top_only": 0.0}
+        self.bottom_drop_period = int(bottom_drop_period) if bottom_drop_period is not None else 0
+        self.bottom_latent_dim = bottom_latent_dim
+        self.top_latent_dim = top_latent_dim
+
+        c1, c2, c3, c4 = encoder_dims
+        h, w = img_size
+        grids = [(h // 2, w // 2), (h // 4, w // 4), (h // 8, w // 8), (h // 16, w // 16)]
+
+        self.down1 = DownBlock(in_chans, c1)
+        self.enc_stage1 = StageViT(c1, encoder_depths[0], num_heads[0], grids[0], tuple(window_size[0]), mlp_ratio, qkv_bias, drop_path_rate, learnable_pos)
+        self.down2 = DownBlock(c1, c2)
+        self.enc_stage2 = StageViT(c2, encoder_depths[1], num_heads[1], grids[1], tuple(window_size[1]), mlp_ratio, qkv_bias, drop_path_rate, learnable_pos)
+        self.bottom_moments = nn.Conv2d(c2, 2 * bottom_latent_dim, 1)
+
+        self.down3 = DownBlock(c2, c3)
+        self.enc_stage3 = StageViT(c3, encoder_depths[2], num_heads[2], grids[2], tuple(window_size[2]), mlp_ratio, qkv_bias, drop_path_rate, learnable_pos)
+        self.down4 = DownBlock(c3, c4)
+        self.enc_stage4 = StageViT(c4, encoder_depths[3], num_heads[3], grids[3], tuple(window_size[3]), mlp_ratio, qkv_bias, drop_path_rate, learnable_pos)
+        self.top_moments = nn.Conv2d(c4, 2 * top_latent_dim, 1)
+
+        self.top_proj = nn.Conv2d(top_latent_dim, c4, 1)
+        self.dec_stage4 = StageViT(c4, decoder_depths[0], num_heads[3], grids[3], tuple(window_size[3]), mlp_ratio, qkv_bias, drop_path_rate, learnable_pos)
+        self.up4 = UpBlock(c4, c3)
+        self.dec_stage3 = StageViT(c3, decoder_depths[1], num_heads[2], grids[2], tuple(window_size[2]), mlp_ratio, qkv_bias, drop_path_rate, learnable_pos)
+        self.up3 = UpBlock(c3, c2)
+
+        self.bottom_proj = nn.Conv2d(bottom_latent_dim, c2, 1)
+        self.register_buffer("null_bottom", torch.zeros(1, bottom_latent_dim, grids[1][0], grids[1][1]))
+        self.bottom_scale = nn.Parameter(torch.tensor(float(bottom_scale_init)))
+        self.dec_stage2 = StageViT(c2, decoder_depths[2], num_heads[1], grids[1], tuple(window_size[1]), mlp_ratio, qkv_bias, drop_path_rate, learnable_pos)
+        self.up2 = UpBlock(c2, c1)
+        self.dec_stage1 = StageViT(c1, decoder_depths[3], num_heads[0], grids[0], tuple(window_size[0]), mlp_ratio, qkv_bias, drop_path_rate, learnable_pos)
+        self.up1 = UpBlock(c1, out_chans, final_block=True)
+
+        self.apply(self._init_conv_weights)
+
+    def _init_conv_weights(self, module):
+        if isinstance(module, nn.Conv2d):
+            nn.init.kaiming_normal_(module.weight, mode="fan_out", nonlinearity="relu")
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0)
+        elif isinstance(module, nn.BatchNorm2d):
+            nn.init.constant_(module.weight, 1.0)
+            nn.init.constant_(module.bias, 0)
+
+    def _sample_or_mode(self, posterior):
+        return posterior.sample() if self.sample_posterior else posterior.mode()
+
+    def _use_bottom(self, global_step=None):
+        if not self.training:
+            return True
+        if self.bottom_drop_period <= 0 or global_step is None:
+            return True
+        return int(global_step) % self.bottom_drop_period != 0
+
+    def encode(self, x):
+        e1 = self.enc_stage1(self.down1(x))
+        e2 = self.enc_stage2(self.down2(e1))
+        bottom_posterior = DiagonalGaussianDistribution(self.bottom_moments(e2))
+        e3 = self.enc_stage3(self.down3(e2))
+        e4 = self.enc_stage4(self.down4(e3))
+        top_posterior = DiagonalGaussianDistribution(self.top_moments(e4))
+        return {"bottom": bottom_posterior, "top": top_posterior}
+
+    def decode(self, z_top, z_bottom=None):
+        b = z_top.shape[0]
+        d4 = self.dec_stage4(self.top_proj(z_top))
+        d3 = self.dec_stage3(self.up4(d4))
+        d2 = self.up3(d3)
+        if z_bottom is None:
+            z_bottom = self.null_bottom.expand(b, -1, -1, -1)
+        d2 = d2 + self.bottom_scale * self.bottom_proj(z_bottom)
+        d2 = self.dec_stage2(d2)
+        d1 = self.dec_stage1(self.up2(d2))
+        return self.up1(d1)
+
+    def forward(self, x, global_step=None):
+        posteriors = self.encode(x)
+        z_top = self._sample_or_mode(posteriors["top"])
+        z_bottom = self._sample_or_mode(posteriors["bottom"])
+        if not self._use_bottom(global_step):
+            z_bottom = torch.zeros_like(z_bottom)
+        x_hat = self.decode(z_top, z_bottom)
+        return x_hat, posteriors

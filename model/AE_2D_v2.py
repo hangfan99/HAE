@@ -93,22 +93,42 @@ class ResidualLayer(nn.Module):
 
 
 class Mix_loss(nn.Module):
-    def __init__(self,kl_weight=1e-4, KL=True):
+    def __init__(self, kl_weight=1e-4, KL=True, kl_weights=None):
         super(Mix_loss, self).__init__()
         self.logvar = nn.Parameter(torch.ones(size=()) * 0.0)
         self.kl_weight = kl_weight
+        self.kl_weights = kl_weights or {}
         self.KL = KL
+
+    def _posterior_kl(self, posterior):
+        kl_loss = posterior.kl()
+        return torch.sum(kl_loss) / kl_loss.shape[0]
+
+    def _kl_loss(self, posteriors):
+        if isinstance(posteriors, dict):
+            total = None
+            for name, posterior in posteriors.items():
+                weight = float(self.kl_weights.get(name, self.kl_weight))
+                value = weight * self._posterior_kl(posterior)
+                total = value if total is None else total + value
+            return total
+        if isinstance(posteriors, (list, tuple)):
+            total = None
+            for idx, posterior in enumerate(posteriors):
+                weight = float(self.kl_weights.get(str(idx), self.kl_weight))
+                value = weight * self._posterior_kl(posterior)
+                total = value if total is None else total + value
+            return total
+        return self.kl_weight * self._posterior_kl(posteriors)
 
     def forward(self, x_recon, x, posteriors):
         rec_loss = torch.square(x_recon.contiguous() - x.contiguous())
         nll_loss = rec_loss / torch.exp(self.logvar) + self.logvar
         # nll_loss = torch.sum(nll_loss) / nll_loss.shape[0]
         nll_loss = torch.mean(nll_loss) / nll_loss.shape[0]
-        kl_loss = posteriors.kl()
-        kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
 
         if self.KL:
-            return nll_loss + self.kl_weight*kl_loss
+            return nll_loss + self._kl_loss(posteriors)
         else:
             return nll_loss
 

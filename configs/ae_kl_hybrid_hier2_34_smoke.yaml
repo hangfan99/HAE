@@ -1,0 +1,67 @@
+experiment:
+  name: AE_KL_hybrid_hier2_34_smoke
+
+model:
+  model_version: "hybrid_hier2_34"
+  in_chans: 69
+  out_chans: 69
+  img_size: [128, 256]
+  encoder_dims: [256, 512, 768, 1024]
+  bottom_latent_dim: 34
+  top_latent_dim: 34
+  encoder_depths: [1, 2, 2, 4]
+  decoder_depths: [4, 2, 2, 1]
+  num_heads: [8, 8, 12, 16]
+  window_size: [[4, 8], [4, 8], [4, 8], [4, 4]]
+  mlp_ratio: 4.0
+  qkv_bias: true
+  drop_path_rate: 0.0
+  sample_posterior: false
+  learnable_pos: true
+  latent_drop:
+    full: 1.0
+    top_only: 0.0
+  bottom_drop_period: 4
+  bottom_scale_init: 0.1
+
+dataset:
+  train:
+    data_dir: huawei_100p:s3://ai4earth/era5_np128x256
+    file_stride: 1
+    train_stride: 1
+    years:
+      train: ["2015-01-01 00:00:00", "2015-01-01 12:00:00"]
+  valid:
+    data_dir: huawei_100p:s3://ai4earth/era5_np128x256
+    file_stride: 1
+    train_stride: 1
+    years:
+      valid: ["2018-01-01 00:00:00", "2018-01-01 12:00:00"]
+
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 1.0e-2
+
+scheduler:
+  warmup_ratio: 0.05
+  num_cycles: 0.5
+
+loss:
+  kl_weight: 1.0e-6
+  kl_weights:
+    bottom: 1.0e-7
+    top: 1.0e-6
+  enable_kl: true
+
+trainer:
+  epochs: 1
+  batch_size: 1
+  valid_batch_size: 1
+  log_interval: 1
+  grad_clip: 1.0
+  refresh_dataloader_each_epoch: true
+  valid_num_workers: 1
+  save_optimizer_in_snapshot: false
+  save_latest_snapshot: false
+  save_best_checkpoint: false
+  save_final_checkpoint: false

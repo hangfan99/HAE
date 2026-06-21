@@ -3,7 +3,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
 from dataset.era5_128x256_finetune import era5_128x256_finetune
-from model.hybrid_vaeformer import HybridVAEformer
+from model.hybrid_vaeformer import HybridHier2VAEformer, HybridVAEformer
 from model.vaeformer import VAEformer
 
 
@@ -44,6 +44,27 @@ class ConfigBuilder:
 
     def build_model(self):
         model_cfg = self.cfg["model"]
+        if str(model_cfg["model_version"]).startswith("hybrid_hier2"):
+            return HybridHier2VAEformer(
+                in_chans=model_cfg.get("in_chans", 69),
+                out_chans=model_cfg.get("out_chans", 69),
+                img_size=tuple(model_cfg.get("img_size", [128, 256])),
+                encoder_dims=tuple(model_cfg.get("encoder_dims", [256, 512, 768, 1024])),
+                bottom_latent_dim=model_cfg.get("bottom_latent_dim", 34),
+                top_latent_dim=model_cfg.get("top_latent_dim", 34),
+                encoder_depths=tuple(model_cfg.get("encoder_depths", [1, 2, 2, 4])),
+                decoder_depths=tuple(model_cfg.get("decoder_depths", [4, 2, 2, 1])),
+                num_heads=tuple(model_cfg.get("num_heads", [8, 8, 12, 16])),
+                window_size=tuple(tuple(x) for x in model_cfg.get("window_size", [[4, 8], [4, 8], [4, 8], [4, 4]])),
+                mlp_ratio=model_cfg.get("mlp_ratio", 4.0),
+                qkv_bias=model_cfg.get("qkv_bias", True),
+                drop_path_rate=model_cfg.get("drop_path_rate", 0.0),
+                sample_posterior=model_cfg.get("sample_posterior", False),
+                learnable_pos=model_cfg.get("learnable_pos", True),
+                latent_drop_probs=model_cfg.get("latent_drop", {"full": 1.0, "top_only": 0.0}),
+                bottom_drop_period=model_cfg.get("bottom_drop_period", 4),
+                bottom_scale_init=model_cfg.get("bottom_scale_init", 0.1),
+            )
         if str(model_cfg["model_version"]).startswith("hybrid_"):
             return HybridVAEformer(
                 in_chans=model_cfg.get("in_chans", 69),
