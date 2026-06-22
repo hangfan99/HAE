@@ -82,17 +82,21 @@ class ChannelToSpaceShortcut(nn.Module):
 
 
 class DownBlock(nn.Module):
-    def __init__(self, in_chans, out_chans):
+    def __init__(self, in_chans, out_chans, use_residual=True):
         super().__init__()
         self.main = nn.Sequential(
             ConvBNAct(in_chans, out_chans, kernel_size=3, stride=2),
             ConvBNAct(out_chans, out_chans, kernel_size=3, stride=1, act=False),
         )
-        self.shortcut = SpaceToChannelShortcut(in_chans, out_chans)
+        self.use_residual = use_residual
+        self.shortcut = SpaceToChannelShortcut(in_chans, out_chans) if use_residual else None
         self.act = nn.SiLU(inplace=True)
 
     def forward(self, x):
-        return self.act(self.main(x) + self.shortcut(x))
+        x_main = self.main(x)
+        if self.use_residual:
+            x_main = x_main + self.shortcut(x)
+        return self.act(x_main)
 
 
 class UpBlock(nn.Module):
@@ -132,6 +136,7 @@ class HybridVAEformer(nn.Module):
         drop_path_rate=0.0,
         sample_posterior=False,
         learnable_pos=True,
+        patch_embed_residual=True,
     ):
         super().__init__()
         if len(stem_dims) == 0:
@@ -150,7 +155,9 @@ class HybridVAEformer(nn.Module):
         self.latent_dim = latent_dim
 
         dims = [in_chans] + list(stem_dims)
-        self.stem = nn.Sequential(*[DownBlock(dims[i], dims[i + 1]) for i in range(len(stem_dims))])
+        self.stem = nn.Sequential(
+            *[DownBlock(dims[i], dims[i + 1], use_residual=patch_embed_residual) for i in range(len(stem_dims))]
+        )
 
         pos_embed = get_2d_sincos_pos_embed(embed_dim, self.patch_shape, cls_token=False)
         self.pos_embed = nn.Parameter(

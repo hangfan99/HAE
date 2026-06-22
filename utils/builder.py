@@ -83,6 +83,7 @@ class ConfigBuilder:
                 drop_path_rate=model_cfg.get("drop_path_rate", 0.0),
                 sample_posterior=model_cfg.get("sample_posterior", False),
                 learnable_pos=model_cfg.get("learnable_pos", True),
+                patch_embed_residual=model_cfg.get("patch_embed_residual", True),
             )
         return VAEformer(
             model_version=model_cfg["model_version"],

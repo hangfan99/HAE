@@ -1,5 +1,12 @@
 #!/bin/bash
 
+# ==========================
+# Manual Edit Interface
+# 只改这一行 yaml 即可，其他参数保持默认
+# ==========================
+yaml=./configs/ae_kl_hybrid_1024_16_full_patch_nores.yaml
+
+# ===== defaults (unchanged) =====
 gpus=4
 node_num=1
 single_gpus=`expr $gpus / $node_num`
@@ -8,11 +15,7 @@ cpus=4
 partition=earth-e2e-p
 quotatype=reserved
 job_name=hae_ae_hybrid_1024_16_patch_nores
-yaml=./configs/ae_kl_hybrid_1024_16_full_patch_nores.yaml
 outdir=output
-
-# yaml=./configs/ae_kl_hybrid_1024_16_full.yaml
-# job_name=hae_ae_hybrid_1024_16_full
 
 while true
 do
