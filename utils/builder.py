@@ -52,6 +52,7 @@ class ConfigBuilder:
                 encoder_dims=tuple(model_cfg.get("encoder_dims", [256, 512, 768, 1024])),
                 bottom_latent_dim=model_cfg.get("bottom_latent_dim", 34),
                 top_latent_dim=model_cfg.get("top_latent_dim", 34),
+                bottom_level=model_cfg.get("bottom_level", 2),
                 encoder_depths=tuple(model_cfg.get("encoder_depths", [1, 2, 2, 4])),
                 decoder_depths=tuple(model_cfg.get("decoder_depths", [4, 2, 2, 1])),
                 num_heads=tuple(model_cfg.get("num_heads", [8, 8, 12, 16])),
@@ -64,6 +65,9 @@ class ConfigBuilder:
                 latent_drop_probs=model_cfg.get("latent_drop", {"full": 1.0, "top_only": 0.0}),
                 bottom_drop_period=model_cfg.get("bottom_drop_period", 4),
                 bottom_scale_init=model_cfg.get("bottom_scale_init", 0.1),
+                bottom_fuse_scale_init=model_cfg.get("bottom_fuse_scale_init", 1.0),
+                bottom_fusion=model_cfg.get("bottom_fusion", "add"),
+                bottom_fuse_block=model_cfg.get("bottom_fuse_block", "conv1x1"),
             )
         if str(model_cfg["model_version"]).startswith("hybrid_"):
             return HybridVAEformer(

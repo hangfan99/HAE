@@ -61,6 +61,21 @@ class ConvBNAct(nn.Module):
         return self.block(x)
 
 
+class ResidualFuseBlock(nn.Module):
+    def __init__(self, in_chans, out_chans):
+        super().__init__()
+        self.proj = ConvBNAct(in_chans, out_chans, kernel_size=1)
+        self.residual = nn.Sequential(
+            ConvBNAct(out_chans, out_chans, kernel_size=3),
+            ConvBNAct(out_chans, out_chans, kernel_size=3, act=False),
+        )
+        self.act = nn.SiLU(inplace=True)
+
+    def forward(self, x):
+        x = self.proj(x)
+        return self.act(x + self.residual(x))
+
+
 class SpaceToChannelShortcut(nn.Module):
     def __init__(self, in_chans, out_chans):
         super().__init__()
@@ -323,6 +338,7 @@ class HybridHier2VAEformer(nn.Module):
         encoder_dims=(256, 512, 768, 1024),
         bottom_latent_dim=34,
         top_latent_dim=34,
+        bottom_level=2,
         encoder_depths=(1, 2, 2, 4),
         decoder_depths=(4, 2, 2, 1),
         num_heads=(8, 8, 12, 16),
@@ -335,6 +351,9 @@ class HybridHier2VAEformer(nn.Module):
         latent_drop_probs=None,
         bottom_drop_period=4,
         bottom_scale_init=0.1,
+        bottom_fuse_scale_init=1.0,
+        bottom_fusion="add",
+        bottom_fuse_block="conv1x1",
     ):
         super().__init__()
         if len(encoder_dims) != 4:
@@ -351,6 +370,15 @@ class HybridHier2VAEformer(nn.Module):
         self.bottom_drop_period = int(bottom_drop_period) if bottom_drop_period is not None else 0
         self.bottom_latent_dim = bottom_latent_dim
         self.top_latent_dim = top_latent_dim
+        self.bottom_level = int(bottom_level)
+        self.bottom_fusion = str(bottom_fusion)
+        self.bottom_fuse_block = str(bottom_fuse_block)
+        if self.bottom_level not in {2, 3}:
+            raise ValueError(f"bottom_level must be 2 or 3, got {bottom_level}.")
+        if self.bottom_fusion not in {"add", "concat", "residual_concat", "residual_multiscale"}:
+            raise ValueError(f"Unsupported bottom_fusion: {bottom_fusion}")
+        if self.bottom_fuse_block not in {"conv1x1", "residual_3x3"}:
+            raise ValueError(f"Unsupported bottom_fuse_block: {bottom_fuse_block}")
 
         c1, c2, c3, c4 = encoder_dims
         h, w = img_size
@@ -360,7 +388,6 @@ class HybridHier2VAEformer(nn.Module):
         self.enc_stage1 = StageViT(c1, encoder_depths[0], num_heads[0], grids[0], tuple(window_size[0]), mlp_ratio, qkv_bias, drop_path_rate, learnable_pos)
         self.down2 = DownBlock(c1, c2)
         self.enc_stage2 = StageViT(c2, encoder_depths[1], num_heads[1], grids[1], tuple(window_size[1]), mlp_ratio, qkv_bias, drop_path_rate, learnable_pos)
-        self.bottom_moments = nn.Conv2d(c2, 2 * bottom_latent_dim, 1)
 
         self.down3 = DownBlock(c2, c3)
         self.enc_stage3 = StageViT(c3, encoder_depths[2], num_heads[2], grids[2], tuple(window_size[2]), mlp_ratio, qkv_bias, drop_path_rate, learnable_pos)
@@ -368,15 +395,25 @@ class HybridHier2VAEformer(nn.Module):
         self.enc_stage4 = StageViT(c4, encoder_depths[3], num_heads[3], grids[3], tuple(window_size[3]), mlp_ratio, qkv_bias, drop_path_rate, learnable_pos)
         self.top_moments = nn.Conv2d(c4, 2 * top_latent_dim, 1)
 
+        bottom_dim = c2 if self.bottom_level == 2 else c3
+        bottom_grid = grids[1] if self.bottom_level == 2 else grids[2]
+        fine_dim = c1 if self.bottom_level == 2 else c2
+        self.bottom_moments = nn.Conv2d(bottom_dim, 2 * bottom_latent_dim, 1)
+
         self.top_proj = nn.Conv2d(top_latent_dim, c4, 1)
         self.dec_stage4 = StageViT(c4, decoder_depths[0], num_heads[3], grids[3], tuple(window_size[3]), mlp_ratio, qkv_bias, drop_path_rate, learnable_pos)
         self.up4 = UpBlock(c4, c3)
         self.dec_stage3 = StageViT(c3, decoder_depths[1], num_heads[2], grids[2], tuple(window_size[2]), mlp_ratio, qkv_bias, drop_path_rate, learnable_pos)
         self.up3 = UpBlock(c3, c2)
 
-        self.bottom_proj = nn.Conv2d(bottom_latent_dim, c2, 1)
-        self.register_buffer("null_bottom", torch.zeros(1, bottom_latent_dim, grids[1][0], grids[1][1]))
+        self.bottom_proj = nn.Conv2d(bottom_latent_dim, bottom_dim, 1)
+        fuse_block = ResidualFuseBlock if self.bottom_fuse_block == "residual_3x3" else partial(ConvBNAct, kernel_size=1)
+        self.bottom_fuse = fuse_block(2 * bottom_dim, bottom_dim) if self.bottom_fusion in {"concat", "residual_concat", "residual_multiscale"} else None
+        self.bottom_proj_fine = nn.Conv2d(bottom_latent_dim, fine_dim, 1) if self.bottom_fusion == "residual_multiscale" else None
+        self.bottom_fuse_fine = fuse_block(2 * fine_dim, fine_dim) if self.bottom_fusion == "residual_multiscale" else None
+        self.register_buffer("null_bottom", torch.zeros(1, bottom_latent_dim, bottom_grid[0], bottom_grid[1]))
         self.bottom_scale = nn.Parameter(torch.tensor(float(bottom_scale_init)))
+        self.bottom_fuse_scale = nn.Parameter(torch.tensor(float(bottom_fuse_scale_init)))
         self.dec_stage2 = StageViT(c2, decoder_depths[2], num_heads[1], grids[1], tuple(window_size[1]), mlp_ratio, qkv_bias, drop_path_rate, learnable_pos)
         self.up2 = UpBlock(c2, c1)
         self.dec_stage1 = StageViT(c1, decoder_depths[3], num_heads[0], grids[0], tuple(window_size[0]), mlp_ratio, qkv_bias, drop_path_rate, learnable_pos)
@@ -406,8 +443,11 @@ class HybridHier2VAEformer(nn.Module):
     def encode(self, x):
         e1 = self.enc_stage1(self.down1(x))
         e2 = self.enc_stage2(self.down2(e1))
-        bottom_posterior = DiagonalGaussianDistribution(self.bottom_moments(e2))
+        if self.bottom_level == 2:
+            bottom_posterior = DiagonalGaussianDistribution(self.bottom_moments(e2))
         e3 = self.enc_stage3(self.down3(e2))
+        if self.bottom_level == 3:
+            bottom_posterior = DiagonalGaussianDistribution(self.bottom_moments(e3))
         e4 = self.enc_stage4(self.down4(e3))
         top_posterior = DiagonalGaussianDistribution(self.top_moments(e4))
         return {"bottom": bottom_posterior, "top": top_posterior}
@@ -416,12 +456,35 @@ class HybridHier2VAEformer(nn.Module):
         b = z_top.shape[0]
         d4 = self.dec_stage4(self.top_proj(z_top))
         d3 = self.dec_stage3(self.up4(d4))
-        d2 = self.up3(d3)
         if z_bottom is None:
             z_bottom = self.null_bottom.expand(b, -1, -1, -1)
-        d2 = d2 + self.bottom_scale * self.bottom_proj(z_bottom)
+        bottom_feat = self.bottom_scale * self.bottom_proj(z_bottom)
+        if self.bottom_level == 3:
+            if self.bottom_fusion == "concat":
+                d3 = self.bottom_fuse(torch.cat([d3, bottom_feat], dim=1))
+            elif self.bottom_fusion in {"residual_concat", "residual_multiscale"}:
+                d3 = d3 + self.bottom_fuse_scale * self.bottom_fuse(torch.cat([d3, bottom_feat], dim=1))
+            else:
+                d3 = d3 + bottom_feat
+        d2 = self.up3(d3)
+        if self.bottom_level == 2:
+            if self.bottom_fusion == "concat":
+                d2 = self.bottom_fuse(torch.cat([d2, bottom_feat], dim=1))
+            elif self.bottom_fusion in {"residual_concat", "residual_multiscale"}:
+                d2 = d2 + self.bottom_fuse_scale * self.bottom_fuse(torch.cat([d2, bottom_feat], dim=1))
+            else:
+                d2 = d2 + bottom_feat
+        elif self.bottom_fusion == "residual_multiscale":
+            z_bottom_fine = F.interpolate(z_bottom, size=d2.shape[-2:], mode="bilinear", align_corners=False)
+            bottom_feat_fine = self.bottom_scale * self.bottom_proj_fine(z_bottom_fine)
+            d2 = d2 + self.bottom_fuse_scale * self.bottom_fuse_fine(torch.cat([d2, bottom_feat_fine], dim=1))
         d2 = self.dec_stage2(d2)
-        d1 = self.dec_stage1(self.up2(d2))
+        d1 = self.up2(d2)
+        if self.bottom_level == 2 and self.bottom_fusion == "residual_multiscale":
+            z_bottom_fine = F.interpolate(z_bottom, size=d1.shape[-2:], mode="bilinear", align_corners=False)
+            bottom_feat_fine = self.bottom_scale * self.bottom_proj_fine(z_bottom_fine)
+            d1 = d1 + self.bottom_fuse_scale * self.bottom_fuse_fine(torch.cat([d1, bottom_feat_fine], dim=1))
+        d1 = self.dec_stage1(d1)
         return self.up1(d1)
 
     def forward(self, x, global_step=None):
@@ -429,6 +492,6 @@ class HybridHier2VAEformer(nn.Module):
         z_top = self._sample_or_mode(posteriors["top"])
         z_bottom = self._sample_or_mode(posteriors["bottom"])
         if not self._use_bottom(global_step):
-            z_bottom = torch.zeros_like(z_bottom)
+            z_bottom = z_bottom * 0.0
         x_hat = self.decode(z_top, z_bottom)
         return x_hat, posteriors
