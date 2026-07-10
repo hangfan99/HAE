@@ -1,0 +1,64 @@
+experiment:
+  name: AE_hybrid_hier2_34_balanced_bottomdrop_ae20
+
+model:
+  model_version: "hybrid_hier2_34_balanced_bottomdrop"
+  in_chans: 69
+  out_chans: 69
+  img_size: [128, 256]
+  encoder_dims: [256, 512, 768, 1024]
+  bottom_latent_dim: 34
+  top_latent_dim: 34
+  encoder_depths: [1, 2, 2, 4]
+  decoder_depths: [1, 1, 8, 6]
+  num_heads: [8, 8, 12, 16]
+  window_size: [[4, 8], [4, 8], [4, 8], [4, 4]]
+  mlp_ratio: 4.0
+  qkv_bias: true
+  drop_path_rate: 0.0
+  sample_posterior: false
+  learnable_pos: true
+  latent_drop:
+    full: 1.0
+    top_only: 0.0
+  # Drop bottom every 5 train steps, i.e. about 20% top-only reconstruction.
+  bottom_drop_period: 5
+  bottom_scale_init: 1.0
+  bottom_fuse_scale_init: 1.0
+  bottom_fusion: residual_multiscale
+  bottom_fuse_block: residual_3x3
+
+dataset:
+  train:
+    data_dir: huawei_100p:s3://ai4earth/era5_np128x256
+    file_stride: 1
+    train_stride: 1
+  valid:
+    data_dir: huawei_100p:s3://ai4earth/era5_np128x256
+    file_stride: 1
+    train_stride: 7
+
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 1.0e-2
+
+scheduler:
+  warmup_ratio: 0.05
+  num_cycles: 0.5
+
+loss:
+  kl_weight: 0.0
+  enable_kl: false
+
+trainer:
+  epochs: 20
+  batch_size: 8
+  valid_batch_size: 4
+  log_interval: 50
+  grad_clip: 1.0
+  refresh_dataloader_each_epoch: true
+  valid_num_workers: 4
+  save_optimizer_in_snapshot: false
+  save_latest_snapshot: false
+  save_best_checkpoint: true
+  save_final_checkpoint: false
