@@ -100,10 +100,11 @@ def init_distributed_mode(args):
         args.rank = int(os.environ['SLURM_PROCID'])
         args.local_rank = int(os.environ['SLURM_LOCALID'])
         args.world_size = int(os.environ['SLURM_NTASKS'])
-        ip_addr = get_ip(os.environ['SLURM_STEP_NODELIST'])
-        port = int(os.environ['SLURM_SRUN_COMM_PORT'])
-        # args.init_method = ip_addr + str(port)
-        args.init_method = ip_addr + args.init_method.split(":")[-1]
+        job_id = os.environ.get('SLURM_JOB_ID', 'nojid')
+        step_id = os.environ.get('SLURM_STEP_ID', 'nostep')
+        dist_dir = os.path.abspath(os.path.join(os.getcwd(), '.dist_init'))
+        os.makedirs(dist_dir, exist_ok=True)
+        args.init_method = 'file://' + os.path.join(dist_dir, f'torch_{job_id}_{step_id}')
     else:
         print('Not using distributed mode')
         args.distributed = False

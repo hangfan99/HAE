@@ -1,5 +1,5 @@
 experiment:
-  name: AE_KL_hybrid_hier2_34_full
+  name: AE_hybrid_hier2_34_add_scale1_ae20_nockpt
 
 model:
   model_version: "hybrid_hier2_34"
@@ -21,8 +21,9 @@ model:
   latent_drop:
     full: 1.0
     top_only: 0.0
-  bottom_drop_period: 4
-  bottom_scale_init: 0.1
+  bottom_drop_period: 0
+  bottom_scale_init: 1.0
+  bottom_fusion: add
 
 dataset:
   train:
@@ -43,14 +44,11 @@ scheduler:
   num_cycles: 0.5
 
 loss:
-  kl_weight: 1.0e-6
-  kl_weights:
-    bottom: 1.0e-7
-    top: 1.0e-6
-  enable_kl: true
+  kl_weight: 0.0
+  enable_kl: false
 
 trainer:
-  epochs: 50
+  epochs: 20
   batch_size: 32
   valid_batch_size: 8
   log_interval: 50
@@ -59,5 +57,5 @@ trainer:
   valid_num_workers: 4
   save_optimizer_in_snapshot: false
   save_latest_snapshot: false
-  save_best_checkpoint: true
+  save_best_checkpoint: false
   save_final_checkpoint: false

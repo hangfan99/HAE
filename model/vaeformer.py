@@ -728,6 +728,35 @@ class VAEformer(nn.Module):
                 ),
             )
 
+        if model_version == "578_16":
+            embed_dim=578
+            y_channels=2048
+            lower_dim=True
+            sample_posterior = False # True
+            ddconfig=dict(
+                arch = 'vit_large',
+                pretrained_model = '',
+                patch_size=(16,16),
+                patch_stride=(16,16),
+                in_chans=69,
+                out_chans=69,
+                kwargs=dict(
+                    embed_dim=2048,
+                    z_dim =  None,
+                    learnable_pos= True,
+                    window= True,
+                    # window_size = [(4, 4), (4, 4), (4, 4)],
+                    window_size = [(6, 6), (3, 12), (12, 3)],
+                    interval = 4,
+                    drop_path_rate= 0.,
+                    round_padding= True,
+                    pad_attn_mask= True , # to_do: ablation
+                    test_pos_mode= 'learnable_simple_interpolate', # to_do: ablation
+                    # lms_checkpoint_train= True,
+                    img_size= (128, 256)
+                ),
+            )
+
         if model_version == "1104_16":
             embed_dim=1104
             y_channels=2048

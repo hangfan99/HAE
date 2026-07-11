@@ -7,8 +7,9 @@ cpus=4
 
 partition=earth-e2e-p
 quotatype=reserved
-job_name=hae_ae_hybrid_1024_16_patch_nores
-yaml=./configs/ae_kl_hybrid_1024_16_full_patch_nores.yaml
+job_name=hae
+# yaml=./configs/ae_kl_hybrid_1024_16_full_patch_nores.yaml
+yaml=./configs/ae_kl_hybrid_hier2_34_full.yaml
 outdir=output
 
 # yaml=./configs/ae_kl_hybrid_1024_16_full.yaml

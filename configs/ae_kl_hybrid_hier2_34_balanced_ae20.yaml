@@ -1,8 +1,8 @@
 experiment:
-  name: AE_KL_hybrid_hier2_34_full
+  name: AE_hybrid_hier2_34_balanced_ae20
 
 model:
-  model_version: "hybrid_hier2_34"
+  model_version: "hybrid_hier2_34_balanced"
   in_chans: 69
   out_chans: 69
   img_size: [128, 256]
@@ -10,7 +10,7 @@ model:
   bottom_latent_dim: 34
   top_latent_dim: 34
   encoder_depths: [1, 2, 2, 4]
-  decoder_depths: [4, 2, 2, 1]
+  decoder_depths: [1, 1, 8, 6]
   num_heads: [8, 8, 12, 16]
   window_size: [[4, 8], [4, 8], [4, 8], [4, 4]]
   mlp_ratio: 4.0
@@ -21,8 +21,11 @@ model:
   latent_drop:
     full: 1.0
     top_only: 0.0
-  bottom_drop_period: 4
-  bottom_scale_init: 0.1
+  bottom_drop_period: 0
+  bottom_scale_init: 1.0
+  bottom_fuse_scale_init: 1.0
+  bottom_fusion: residual_multiscale
+  bottom_fuse_block: residual_3x3
 
 dataset:
   train:
@@ -43,16 +46,13 @@ scheduler:
   num_cycles: 0.5
 
 loss:
-  kl_weight: 1.0e-6
-  kl_weights:
-    bottom: 1.0e-7
-    top: 1.0e-6
-  enable_kl: true
+  kl_weight: 0.0
+  enable_kl: false
 
 trainer:
-  epochs: 50
-  batch_size: 32
-  valid_batch_size: 8
+  epochs: 20
+  batch_size: 16
+  valid_batch_size: 4
   log_interval: 50
   grad_clip: 1.0
   refresh_dataloader_each_epoch: true

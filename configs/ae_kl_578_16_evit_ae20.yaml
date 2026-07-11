@@ -1,0 +1,42 @@
+experiment:
+  name: AE_578_16_evit_ae20
+
+model:
+  model_version: "578_16"
+  sample_posterior: false
+  patch_embed_type: efficientvit
+
+dataset:
+  train:
+    data_dir: huawei_100p:s3://ai4earth/era5_np128x256
+    file_stride: 1
+    train_stride: 1
+  valid:
+    data_dir: huawei_100p:s3://ai4earth/era5_np128x256
+    file_stride: 1
+    train_stride: 7
+
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 1.0e-2
+
+scheduler:
+  warmup_ratio: 0.05
+  num_cycles: 0.5
+
+loss:
+  kl_weight: 0.0
+  enable_kl: false
+
+trainer:
+  epochs: 20
+  batch_size: 8
+  valid_batch_size: 8
+  log_interval: 50
+  grad_clip: 1.0
+  refresh_dataloader_each_epoch: true
+  valid_num_workers: 4
+  save_optimizer_in_snapshot: false
+  save_latest_snapshot: false
+  save_best_checkpoint: true
+  save_final_checkpoint: false

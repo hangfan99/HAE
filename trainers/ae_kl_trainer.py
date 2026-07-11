@@ -283,6 +283,11 @@ class AEKLTrainer:
             if self.rank == 0 and self.cfg["trainer"].get("save_final_checkpoint", True):
                 self._save_final_checkpoint()
 
+            if self.rank == 0:
+                self.logger.info("Training complete. Best mix=%.6f", self.best_loss)
+                if not self.cfg["trainer"].get("save_best_checkpoint", True) and not self.cfg["trainer"].get("save_final_checkpoint", True):
+                    self.logger.info("Checkpoint saving disabled by config.")
+
             if self.distributed:
                 torch.distributed.barrier(device_ids=[self.local_rank])
         finally:
