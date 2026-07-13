@@ -29,171 +29,203 @@ python train.py --cfg configs/ae_kl.yaml --outdir output --resume --resume_dir <
 
 If `flash_attn` is unavailable, attention automatically falls back to standard PyTorch attention.
 
-## Current Codex Handoff
+## Current HAE Handoff
 
-This repo is currently being used to train ERA5 autoencoders derived from `/mnt/petrelfs/fanhang/AE` VAEformer code. The active direction is a two-level hierarchical AE inspired by VQ-VAE2-style top/bottom latents, while keeping the existing dataset, trainer, validation metrics, and AE-KL training pipeline.
+This repo is currently used for ERA5 hierarchical autoencoder experiments. The active model is `HybridHier2VAEformer` in `model/hybrid_vaeformer.py`, constructed from `utils/builder.py`. The task is moving to another cluster, so this section records the current state and the recommended next run.
 
-### Active Model
+### Recommended Baseline
 
-The default `slurm_train.sh` target is now:
-
-```bash
-configs/ae_kl_hybrid_hier2_34_full.yaml
-```
-
-This builds `HybridHier2VAEformer` in `model/hybrid_vaeformer.py` through `utils/builder.py`. The intended latent shapes are:
+Use this config as the main baseline:
 
 ```text
-z_bottom: 34 x 32 x 64   # higher-resolution detail latent
-z_top:    34 x 8 x 16    # low-resolution coarse/global latent
+configs/ae_kl_hybrid_hier2_34_balanced_ae20.yaml
 ```
 
-Architecture summary:
+It uses the same latent layout as the best-performing current HAE:
 
 ```text
-input 69 x 128 x 256
-
-encoder:
-  DownBlock 69 -> 256,     64 x 128, + StageViT depth 1
-  DownBlock 256 -> 512,    32 x 64,  + StageViT depth 2
-  q_bottom: Conv 512 -> 2 * 34
-
-  DownBlock 512 -> 768,    16 x 32,  + StageViT depth 2
-  DownBlock 768 -> 1024,   8 x 16,   + StageViT depth 4
-  q_top: Conv 1024 -> 2 * 34
-
-decoder:
-  z_top -> Conv 34 -> 1024, + StageViT depth 4
-  UpBlock 1024 -> 768,      16 x 32, + StageViT depth 2
-  UpBlock 768 -> 512,       32 x 64
-  add-fuse bottom: d2 + bottom_scale * bottom_proj(z_bottom)
-  StageViT depth 2
-  UpBlock 512 -> 256,       64 x 128, + StageViT depth 1
-  UpBlock 256 -> 69,        128 x 256, final linear output
+z_bottom: 34 x 32 x 64
+z_top:    34 x 8 x 16
+total latent elements: 73,984
+parameters: about 232M
 ```
 
-Important details:
-
-- Bottom fusion is additive, not concat: `d2 = d2 + bottom_scale * bottom_proj(z_bottom)`.
-- `bottom_scale` is learnable and initialized to `0.1`.
-- Every `bottom_drop_period` steps, the trainer passes `global_step` and the model sets `z_bottom` to all zeros. Default is `bottom_drop_period: 4`, so 1 in 4 steps trains top-only coarse reconstruction.
-- The final output block must stay linear. Do not add `SiLU`, `ReLU`, or final `BatchNorm` to the 69-channel output, because ERA5 data is standardized and contains negative values.
-
-### Loss
-
-`model/AE_2D_v2.py::Mix_loss` supports both the old single posterior and the new dict posterior:
-
-```python
-posteriors = {"bottom": q_bottom, "top": q_top}
-loss = recon_loss + kl_weights["bottom"] * KL(q_bottom) + kl_weights["top"] * KL(q_top)
-```
-
-Current full config uses:
+Key architecture choices:
 
 ```yaml
+encoder_depths: [1, 2, 2, 4]
+decoder_depths: [1, 1, 8, 6]
+bottom_level: 2              # implicit default: bottom comes from 32 x 64 feature level
+bottom_fusion: residual_multiscale
+bottom_fuse_block: residual_3x3
+bottom_drop_period: 0
 loss:
-  kl_weight: 1.0e-6
-  kl_weights:
-    bottom: 1.0e-7
-    top: 1.0e-6
-  enable_kl: true
+  enable_kl: false
 ```
 
-The bottom KL is intentionally smaller because `34*32*64` has many more latent elements than `34*8*16`.
+The decoder fuses bottom features at `32 x 64`, then also sends bottom information to a finer decoder stage through the `residual_multiscale` path. This is the configuration that reduced reconstruction error after strengthening the bottom decoder.
 
-### Training
+Known local result from the earlier balanced run:
 
-Use Slurm. Do not run training directly on a compute node.
+```text
+experiment: AE_hybrid_hier2_34_balanced_ae20
+best validation mix error: 0.067550
+log/checkpoint dir: output/AE_hybrid_hier2_34_balanced_ae20/
+```
 
-Default full training:
+If this checkpoint is not present after migration, retrain from the config above.
+
+### Bottom-Drop Ablation
+
+Use this config only for the ablation where the model is forced to make the top latent useful:
+
+```text
+configs/ae_kl_hybrid_hier2_34_balanced_bottomdrop_ae20.yaml
+```
+
+It keeps the same architecture as the balanced baseline, but enables deterministic bottom drop:
+
+```yaml
+bottom_drop_period: 5   # every 5 train steps, z_bottom is zeroed; about 20% top-only steps
+batch_size: 8
+```
+
+This is intended to answer whether top can carry useful coarse information. It is not the current best pure-reconstruction setting. Expect reconstruction to be worse than no-drop early in training.
+
+Local partial run state before migration:
+
+```text
+experiment: AE_hybrid_hier2_34_balanced_bottomdrop_ae20
+checkpoint dir: output/AE_hybrid_hier2_34_balanced_bottomdrop_ae20/
+local log reached epoch 3, step 8600/10135
+```
+
+Batch 16 OOMed on the shared old node; batch 8 was used there. On a clean cluster with enough memory, batch 16 should be tested again.
+
+### Avoided Direction
+
+The level-3 bottom latent config is kept for reference, but should not be the next main run:
+
+```text
+configs/ae_kl_hybrid_hier2_136b16_34t8_fast_ae20.yaml
+```
+
+It changes the bottom latent from `34 x 32 x 64` to `136 x 16 x 32`. Although the element count is similar, it loses spatial detail too early and produced noticeably worse reconstruction. It is also not the cleanest answer to the top-latent issue.
+
+Current recommendation:
+
+- Keep bottom at `34 x 32 x 64`.
+- Keep the balanced decoder `[1, 1, 8, 6]` as the stable baseline.
+- Use bottom-drop ablation to test whether top carries information.
+- If increasing model size, do it modestly around the bottom decoder/fusion path, not by moving bottom to `16 x 32`.
+
+### Running On A New Cluster
+
+The parent directory has the environment file used on the old cluster:
+
+```text
+../environment.yml
+```
+
+The dataset paths in configs currently point to:
+
+```yaml
+data_dir: huawei_100p:s3://ai4earth/era5_np128x256
+```
+
+On the new cluster, either make this Petrel/S3 path work or update `dataset.train.data_dir` and `dataset.valid.data_dir` in the selected config.
+
+Single-node 4-GPU Slurm-style command:
 
 ```bash
-bash slurm_train.sh
+PORT=$((((RANDOM<<15)|RANDOM)%49152 + 10000))
+mkdir -p out
+srun -p <partition> --quotatype=<quotatype> --job-name=hae_balanced \
+  --ntasks-per-node=4 --cpus-per-task=1 -N 1 \
+  -o ./out/train_%j.out --gres=gpu:4 --kill-on-bad-exit=1 \
+  python -u train.py \
+  --cfg configs/ae_kl_hybrid_hier2_34_balanced_ae20.yaml \
+  --outdir output \
+  --init_method tcp://127.0.0.1:$PORT \
+  --per_cpus 4 \
+  --world_size 4
 ```
 
-Equivalent explicit command:
+For the bottom-drop ablation, switch only the config:
 
 ```bash
-CFG=configs/ae_kl_hybrid_hier2_34_full.yaml bash slurm_train.sh
+--cfg configs/ae_kl_hybrid_hier2_34_balanced_bottomdrop_ae20.yaml
 ```
 
-The script writes submit output to:
+`slurm_train.sh` currently has a hard-coded `yaml=` value. If using that script on the new cluster, edit `yaml`, `partition`, `quotatype`, `job_name`, and `gpus` before submitting.
+
+### Checkpoints And Logs
+
+Training writes fixed experiment directories under `output/`:
 
 ```text
-out/submit_hae_ae_hybrid_hier2_34.out
+output/<experiment.name>/
+  best.pth
+  config_resolved.yaml
+  train.log
+  tb/
 ```
 
-and Slurm training logs to:
-
-```text
-out/train_<jobid>.out
-```
-
-Checkpoints are written to a fixed directory, without timestamp subdirectories:
-
-```text
-output/AE_KL_hybrid_hier2_34_full/
-```
-
-The full config saves only `best.pth` by default:
+Configs are set to save only the best checkpoint:
 
 ```yaml
 save_best_checkpoint: true
 save_final_checkpoint: false
 save_latest_snapshot: false
+save_optimizer_in_snapshot: false
 ```
-
-### Smoke Test
-
-Use the smoke config before full runs after code changes:
-
-```bash
-QUOTATYPE=spot \
-CFG=configs/ae_kl_hybrid_hier2_34_smoke.yaml \
-OUTDIR=output_spot_test \
-JOB_NAME=hae_ae_hier2_add_smoke \
-GPUS=4 CPUS=2 \
-bash slurm_train.sh
-```
-
-Expected behavior:
-
-- 4 distributed train steps.
-- Validation runs once.
-- `sacct` state should be `COMPLETED` with `ExitCode 0:0`.
-- No checkpoint should be saved by the smoke config.
 
 Useful checks:
 
 ```bash
-sacct -j <jobid> --format=JobID,JobName,State,ExitCode,Elapsed,MaxRSS -P
+tail -120 output/<experiment.name>/train.log
 tail -120 out/train_<jobid>.out
+sacct -j <jobid> --format=JobID,JobName,State,ExitCode,Elapsed,MaxRSS -P
 find . -maxdepth 3 -type f -size +100M
 ```
 
-Last known good smoke validation for add-fusion/bottom-zero schedule:
+### Evaluation Notebook
+
+Manual reconstruction evaluation is in:
 
 ```text
-job 9811041: COMPLETED 0:0
-trained 4 steps and ran validation successfully
+HAE_hier2_recon_manual_eval.ipynb
 ```
 
-### Known Pitfalls
+It supports selecting cases manually and comparing:
 
-- Earlier DDP failure: random per-rank latent dropout caused `bottom_moments.weight has been marked as ready twice`. The fix is deterministic `global_step`-based bottom zeroing and `find_unused_parameters=False`.
-- Do not re-enable random per-rank top-only/full branching inside model forward. If top-only training is changed, keep the branch synchronized across ranks.
-- Dataset objects spawn many child processes. The trainer and dataset include explicit close/cleanup logic. Keep `refresh_dataloader_each_epoch: true` for full training and close validation loaders after every validation.
-- Phoenix `srun` may create small `batchscript-*` files in the repo root. These are runtime artifacts and can be deleted.
-- Storage is limited. Avoid saving optimizer snapshots or multiple checkpoints unless explicitly needed. Watch for large files with `find . -maxdepth 3 -type f -size +100M`.
+- HAE top-only reconstruction
+- HAE top+bottom reconstruction
+- absolute `top+bottom - top`
+- signed reconstruction error against truth
+- DC-AE comparison from `AE_KL_hybrid_1024_16_full/best`
+- MAE and bias summaries
+
+Use this notebook after each candidate checkpoint is available.
+
+### Implementation Notes
+
+- `bottom_drop_period` is deterministic from `global_step`. Do not replace it with random per-rank branching, or DDP can diverge.
+- Under Slurm, `utils/misc.py` now uses a local `file://.dist_init/torch_<job>_<step>` init path for DDP. `.dist_init/` is runtime state and should not be committed.
+- The final output stays linear. ERA5 variables are standardized and can be negative; do not add final `ReLU`, `SiLU`, or `BatchNorm`.
+- Dataset workers can leave child processes if interrupted. The trainer/dataset cleanup path is important; keep `refresh_dataloader_each_epoch: true`.
+- Runtime outputs such as `.dist_init/`, `out/`, `output_*`, and `eval_outputs/` should stay out of commits unless explicitly archiving results.
 
 ### Useful Files
 
 ```text
-model/hybrid_vaeformer.py                  # HybridVAEformer and HybridHier2VAEformer
-configs/ae_kl_hybrid_hier2_34_full.yaml    # active full config
-configs/ae_kl_hybrid_hier2_34_smoke.yaml   # fast Slurm smoke config
-model/AE_2D_v2.py                          # Mix_loss with dict posterior support
-trainers/ae_kl_trainer.py                  # train/validation/checkpoint loop
-utils/builder.py                           # model construction
-slurm_train.sh                             # default Slurm entrypoint
+model/hybrid_vaeformer.py                              # HAE model and fusion logic
+utils/builder.py                                       # model construction from YAML
+trainers/ae_kl_trainer.py                              # train/validation/checkpoint loop
+model/AE_2D_v2.py                                      # reconstruction/KL loss
+configs/ae_kl_hybrid_hier2_34_balanced_ae20.yaml       # recommended baseline
+configs/ae_kl_hybrid_hier2_34_balanced_bottomdrop_ae20.yaml  # top-latent ablation
+configs/ae_kl_hybrid_hier2_136b16_34t8_fast_ae20.yaml  # failed/avoid as main route
+HAE_hier2_recon_manual_eval.ipynb                      # manual reconstruction eval
+slurm_train.sh                                         # old-cluster launch helper
 ```
